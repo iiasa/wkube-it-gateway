@@ -2,6 +2,10 @@ import socket
 import threading
 import re
 import base64
+import requests
+import jwt
+import ssl
+from jwt.algorithms import RSAAlgorithm
 from http import HTTPStatus
 
 SESSION_COOKIE_NAME = "auth_token"
@@ -12,15 +16,61 @@ SOCKET_DIR = "/tmp"
 SOCKET_SUFFIX = ".sock"
 DOMAIN = ".wkube.iiasa.ac.at"
 
-def extract_subdomain(host_header: bytes) -> str:
-    try:
-        host = host_header.decode().split(":")[0]  # remove port
-        if host.endswith(DOMAIN):
-            subdomain = host.replace(DOMAIN, "")
-            return subdomain
-    except Exception as e:
-        print(f"Failed to parse subdomain: {e}")
+JWKS_URL = "https://accelerator-api.iiasa.ac.at/.well-known/jwks.json"
+EXPECTED_KID = "rsa-key-2024-07"
+_jwks_cache = {}
+
+
+context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+context.load_cert_chain(certfile="/path/to/cert.pem", keyfile="/path/to/key.pem")
+context.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1
+context.set_ciphers("ECDHE+AESGCM")
+
+
+def extract_jwt_from_auth(headers):
+    auth = headers.get(b'authorization')
+    if not auth or not auth.startswith(b"Bearer "):
+        return None
+    token = auth.split(b" ", 1)[1].decode()
+    if verify_jwt(token):
+        return token
     return None
+
+def get_public_key(kid):
+    global _jwks_cache
+    if kid in _jwks_cache:
+        return _jwks_cache[kid]
+
+    try:
+        resp = requests.get(JWKS_URL)
+        resp.raise_for_status()
+        jwks = resp.json()
+        for key in jwks.get("keys", []):
+            if key.get("kid") == kid:
+                pubkey = RSAAlgorithm.from_jwk(key)
+                _jwks_cache[kid] = pubkey
+                return pubkey
+    except Exception as e:
+        print(f"Failed to fetch JWKS: {e}")
+    return None
+
+
+def verify_jwt(token):
+    try:
+        unverified_header = jwt.get_unverified_header(token)
+        kid = unverified_header.get("kid")
+        if kid != EXPECTED_KID:
+            print(f"Unexpected key ID: {kid}")
+            return False
+        pubkey = get_public_key(kid)
+        if not pubkey:
+            return False
+        token_details = jwt.decode(token, pubkey, algorithms=["RS256"], audience=None)  # Adjust audience if needed
+        # TODO verify further token details. Before that make a backend and frontend to get token for this just as device token
+        return True
+    except Exception as e:
+        print(f"JWT verification failed: {e}")
+        return False
 
 def connect_unix_socket(subdomain):
     path = f"{SOCKET_DIR}/{subdomain}{SOCKET_SUFFIX}"
@@ -51,22 +101,16 @@ def is_valid_cookie(headers):
     cookie_str = cookies.decode()
     for part in cookie_str.split(";"):
         if part.strip().startswith(f"{SESSION_COOKIE_NAME}="):
-            val = part.strip().split("=")[1]
-            if val == TOKEN:
-                return True
+            token = part.strip().split("=", 1)[1]
+            return verify_jwt(token)
     return False
 
 def is_valid_basic_auth(headers):
     auth = headers.get(b'authorization')
-    if not auth or not auth.startswith(b"Basic "):
+    if not auth or not auth.startswith(b"Bearer "):
         return False
-    encoded = auth.split(b" ", 1)[1]
-    try:
-        decoded = base64.b64decode(encoded).decode()
-        username, password = decoded.split(":", 1)
-        return password == TOKEN
-    except Exception:
-        return False
+    token = auth.split(b" ", 1)[1].decode()
+    return verify_jwt(token)
 
 def handle_http(client):
     data = client.recv(4096)
@@ -87,22 +131,25 @@ def handle_http(client):
         client.close()
         return
 
-    # Check for cookie or basic auth
-    if not is_valid_cookie(headers) and not is_valid_basic_auth(headers):
+    jwt_from_cookie = is_valid_cookie(headers)
+    jwt_from_auth = extract_jwt_from_auth(headers)
+
+    # If neither JWT source is valid, reject the request
+    if not jwt_from_cookie and not jwt_from_auth:
         client.send(
             b"HTTP/1.1 401 Unauthorized\r\n"
-            b"WWW-Authenticate: Basic realm=\"Access Required\"\r\n"
+            b"WWW-Authenticate: Bearer realm=\"Access Required\"\r\n"
             b"Content-Type: text/plain\r\n\r\n"
             b"Unauthorized: Valid token required\n"
         )
         client.close()
         return
 
-    # If basic auth was valid but no cookie, issue a Set-Cookie header
+    # If valid via Authorization header but not cookie, set cookie
     set_cookie = b""
-    if is_valid_basic_auth(headers) and not is_valid_cookie(headers):
+    if jwt_from_auth and not jwt_from_cookie:
         set_cookie = (
-            f"Set-Cookie: {SESSION_COOKIE_NAME}={TOKEN}; Path=/; HttpOnly\r\n".encode()
+            f"Set-Cookie: {SESSION_COOKIE_NAME}={jwt_from_auth}; Path=/; HttpOnly\r\n".encode()
         )
 
     # Forward to backend
@@ -134,29 +181,42 @@ def handle_http(client):
         print(f"[HTTP] Proxy error: {e}")
     finally:
         client.close()
-def handle_tcp(client):
+
+
+def handle_tls(client):
     try:
+        tls_client = context.wrap_socket(client, server_side=True)
+        handle_http(tls_client)  # same logic as before, just using decrypted stream
+    except ssl.SSLError as e:
+        print(f"[TLS] SSL error: {e}")
+        client.close()
+
+
+def handle_ssh(client):
+    try:
+        # Step 1: Authenticate
         client.send(b"Token: ")
         token = client.recv(1024).strip()
-        if token.decode() != TOKEN:
+        if not verify_jwt(token):
             client.send(b"Access denied\n")
+            client.close()
+            return
+
+        # Step 2: Ask for subdomain
+        client.send(b"Subdomain: ")
+        subdomain = client.recv(1024).strip().decode()
+
+        # Validate subdomain format (alphanumeric and hyphens)
+        if not re.match(r"^[a-zA-Z0-9\-]+$", subdomain):
+            client.send(b"Invalid subdomain format\n")
             client.close()
             return
 
         client.send(b"Access granted. Connecting...\n")
 
-        # Get SNI-style domain (hacky): read peeked Host header manually
-        peek = client.recv(256, socket.MSG_PEEK)
-        match = re.search(rb'Host: ([a-zA-Z0-9\-]+)\.wkube\.iiasa\.ac\.at', peek)
-        if not match:
-            client.send(b"No valid Host found for backend\n")
-            client.close()
-            return
-
-        subdomain = match.group(1).decode()
-
         backend = connect_unix_socket(subdomain)
 
+        # Step 3: Proxy data between client and backend
         def forward(src, dst):
             try:
                 while True:
@@ -172,18 +232,52 @@ def handle_tcp(client):
         threading.Thread(target=forward, args=(backend, client)).start()
 
     except Exception as e:
-        print(f"[TCP] Error: {e}")
+        print(f"[SSH] Error: {e}")
         client.close()
-
+        
 def handle_client(client):
     try:
-        peek = client.recv(16, socket.MSG_PEEK)
+        peek = client.recv(8, socket.MSG_PEEK)
+
+        # HTTP (for redirect)
         if peek.startswith(b"GET") or peek.startswith(b"POST") or b"HTTP" in peek:
-            handle_http(client)
-        else:
-            handle_tcp(client)
+            data = client.recv(4096)  # consume the request
+            headers = parse_headers(data)
+            host = headers.get(b"host")
+
+            if not host:
+                client.send(
+                    b"HTTP/1.1 400 Bad Request\r\n\r\nMissing Host header"
+                )
+                client.close()
+                return
+            
+            location = f"https://{host.decode()}/"
+
+            client.send(
+                b"HTTP/1.1 301 Moved Permanently\r\n"
+                + f"Location: {location}\r\n".encode()
+                + b"Content-Length: 0\r\n\r\n"
+            )
+            client.close()
+            return
+
+        # TLS detection: first byte is 0x16 (Handshake), next 2 bytes are version
+        if len(peek) >= 3 and peek[0] == 0x16 and peek[1] == 0x03:
+            handle_tls(client)
+            return
+
+        # SSH detection: starts with ASCII "SSH-"
+        if peek.startswith(b'SSH-'):
+            handle_ssh(client)
+            return
+
+        # Unknown protocol
+        client.send(b"Unrecognized protocol. Only SSH and TLS are supported.\n")
+        client.close()
+
     except Exception as e:
-        print(f"Connection error: {e}")
+        print(f"[Error] Connection handling failed: {e}")
         client.close()
 
 def main():
