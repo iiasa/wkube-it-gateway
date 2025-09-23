@@ -12,7 +12,7 @@ RUN go mod download
 COPY . .
 
 # Build the Go binary
-RUN env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o itgateway main.go
+RUN env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o itgateway gateway.go
 
 # --- Stage 2: Create final image with SSH server ---
 FROM linuxserver/openssh-server
