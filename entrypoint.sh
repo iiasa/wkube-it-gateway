@@ -1,11 +1,12 @@
 #!/bin/bash
+set -e
 
-# Modify sshd_config (in container: /etc/ssh/sshd_config)
 SSHD_CONFIG="/etc/ssh/sshd_config"
-
-# Enable GatewayPorts
 sed -i 's/^#GatewayPorts .*/GatewayPorts yes/' "$SSHD_CONFIG"
 grep -q '^GatewayPorts' "$SSHD_CONFIG" || echo "GatewayPorts yes" >> "$SSHD_CONFIG"
 
-# Start the original entrypoint script
+# Start Go app in background, redirect logs to stdout
+/usr/local/bin/itgateway >> /proc/1/fd/1 2>&1 &
+
+# Start init system in foreground (sshd etc.)
 exec /init

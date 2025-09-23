@@ -5,20 +5,14 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"net/http"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
-
-	"github.com/golang-jwt/jwt/v5"
 )
 
 const (
@@ -33,47 +27,6 @@ const (
 	KeyPath           = "/path/to/key.pem"
 )
 
-var jwksCache sync.Map
-
-func getPublicKey(kid string) (any, error) {
-	if val, ok := jwksCache.Load(kid); ok {
-		return val, nil
-	}
-	resp, err := http.Get(JWKSUrl)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	var jwks struct {
-		Keys []json.RawMessage `json:"keys"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
-		return nil, err
-	}
-	for _, raw := range jwks.Keys {
-		var keyMap map[string]interface{}
-		json.Unmarshal(raw, &keyMap)
-		if keyMap["kid"] == ExpectedKid {
-			pubkey, err := jwt.ParseRSAPublicKeyFromPEM([]byte(raw))
-			if err == nil {
-				jwksCache.Store(ExpectedKid, pubkey)
-				return pubkey, nil
-			}
-		}
-	}
-	return nil, fmt.Errorf("no matching key")
-}
-
-func verifyJWT(tokenStr string) bool {
-	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
-		header := token.Header
-		if kid, ok := header["kid"].(string); ok && kid == ExpectedKid {
-			return getPublicKey(kid)
-		}
-		return nil, fmt.Errorf("invalid kid")
-	})
-	return err == nil && token.Valid
-}
 
 func extractSubdomain(host string) string {
 	host = strings.Split(host, ":")[0]
@@ -112,53 +65,36 @@ func connectUnixSocket(subdomain string) (net.Conn, error) {
 
 func handleHTTP(conn net.Conn) {
 	defer conn.Close()
+
 	data := make([]byte, 4096)
 	n, _ := conn.Read(data)
+
 	headers := parseHeaders(data[:n])
 	host := headers["host"]
 	if host == "" {
 		conn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\nMissing Host header"))
 		return
 	}
+
 	subdomain := extractSubdomain(host)
 	if subdomain == "" {
 		conn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\nInvalid Host"))
 		return
 	}
 
-	jwtToken := ""
-	if auth := headers["authorization"]; strings.HasPrefix(auth, "Bearer ") {
-		token := strings.TrimPrefix(auth, "Bearer ")
-		if verifyJWT(token) {
-			jwtToken = token
-		}
-	}
-	if jwtToken == "" && headers["cookie"] != "" {
-		for _, part := range strings.Split(headers["cookie"], ";") {
-			part = strings.TrimSpace(part)
-			if strings.HasPrefix(part, SessionCookieName+"=") {
-				token := strings.TrimPrefix(part, SessionCookieName+"=")
-				if verifyJWT(token) {
-					jwtToken = token
-				}
-			}
-		}
-	}
-
-	if jwtToken == "" {
-		conn.Write([]byte("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer realm=\"Access Required\"\r\n\r\nUnauthorized"))
-		return
-	}
+	// --- removed all Bearer/cookie/JWT checks ---
 
 	backend, err := connectUnixSocket(subdomain)
 	if err != nil {
 		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nBackend connection failed"))
 		return
 	}
+
 	backend.Write(data[:n])
 	go forward(backend, conn)
 	forward(conn, backend)
 }
+
 
 func handleTLS(conn net.Conn) {
 	cert, err := tls.LoadX509KeyPair(CertPath, KeyPath)
@@ -201,30 +137,28 @@ func handlePlainHTTP(conn net.Conn) {
 
 func handleSSH(conn net.Conn) {
 	defer conn.Close()
+
 	reader := bufio.NewReader(conn)
-	conn.Write([]byte("Token: "))
-	token, _ := reader.ReadString('\n')
-	token = strings.TrimSpace(token)
-	if !verifyJWT(token) {
-		conn.Write([]byte("Access denied\n"))
-		return
-	}
 	conn.Write([]byte("Subdomain: "))
 	subdomain, _ := reader.ReadString('\n')
 	subdomain = strings.TrimSpace(subdomain)
+
 	if matched, _ := regexp.MatchString(`^[a-zA-Z0-9\-]+$`, subdomain); !matched {
 		conn.Write([]byte("Invalid subdomain format\n"))
 		return
 	}
-	conn.Write([]byte("Access granted. Connecting...\n"))
+
+	conn.Write([]byte("Connecting...\n"))
 	backend, err := connectUnixSocket(subdomain)
 	if err != nil {
 		conn.Write([]byte("Backend connection failed\n"))
 		return
 	}
+
 	go forward(conn, backend)
 	forward(backend, conn)
 }
+
 
 func handleConnection(conn net.Conn) {
 	peek := make([]byte, 8)

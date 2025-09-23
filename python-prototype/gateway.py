@@ -27,51 +27,6 @@ context.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1
 context.set_ciphers("ECDHE+AESGCM")
 
 
-def extract_jwt_from_auth(headers):
-    auth = headers.get(b'authorization')
-    if not auth or not auth.startswith(b"Bearer "):
-        return None
-    token = auth.split(b" ", 1)[1].decode()
-    if verify_jwt(token):
-        return token
-    return None
-
-def get_public_key(kid):
-    global _jwks_cache
-    if kid in _jwks_cache:
-        return _jwks_cache[kid]
-
-    try:
-        resp = requests.get(JWKS_URL)
-        resp.raise_for_status()
-        jwks = resp.json()
-        for key in jwks.get("keys", []):
-            if key.get("kid") == kid:
-                pubkey = RSAAlgorithm.from_jwk(key)
-                _jwks_cache[kid] = pubkey
-                return pubkey
-    except Exception as e:
-        print(f"Failed to fetch JWKS: {e}")
-    return None
-
-
-def verify_jwt(token):
-    try:
-        unverified_header = jwt.get_unverified_header(token)
-        kid = unverified_header.get("kid")
-        if kid != EXPECTED_KID:
-            print(f"Unexpected key ID: {kid}")
-            return False
-        pubkey = get_public_key(kid)
-        if not pubkey:
-            return False
-        token_details = jwt.decode(token, pubkey, algorithms=["RS256"], audience=None)  # Adjust audience if needed
-        # TODO verify further token details. Before that make a backend and frontend to get token for this just as device token
-        return True
-    except Exception as e:
-        print(f"JWT verification failed: {e}")
-        return False
-
 def connect_unix_socket(subdomain):
     path = f"{SOCKET_DIR}/{subdomain}{SOCKET_SUFFIX}"
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -94,23 +49,7 @@ def extract_subdomain(host: bytes) -> str:
         return host.replace(DOMAIN, "")
     return None
 
-def is_valid_cookie(headers):
-    cookies = headers.get(b'cookie')
-    if not cookies:
-        return False
-    cookie_str = cookies.decode()
-    for part in cookie_str.split(";"):
-        if part.strip().startswith(f"{SESSION_COOKIE_NAME}="):
-            token = part.strip().split("=", 1)[1]
-            return verify_jwt(token)
-    return False
 
-def is_valid_basic_auth(headers):
-    auth = headers.get(b'authorization')
-    if not auth or not auth.startswith(b"Bearer "):
-        return False
-    token = auth.split(b" ", 1)[1].decode()
-    return verify_jwt(token)
 
 def handle_http(client):
     data = client.recv(4096)
@@ -131,33 +70,13 @@ def handle_http(client):
         client.close()
         return
 
-    jwt_from_cookie = is_valid_cookie(headers)
-    jwt_from_auth = extract_jwt_from_auth(headers)
+    # --- authentication removed ---
+    # Just forward the request to backend
 
-    # If neither JWT source is valid, reject the request
-    if not jwt_from_cookie and not jwt_from_auth:
-        client.send(
-            b"HTTP/1.1 401 Unauthorized\r\n"
-            b"WWW-Authenticate: Bearer realm=\"Access Required\"\r\n"
-            b"Content-Type: text/plain\r\n\r\n"
-            b"Unauthorized: Valid token required\n"
-        )
-        client.close()
-        return
-
-    # If valid via Authorization header but not cookie, set cookie
-    set_cookie = b""
-    if jwt_from_auth and not jwt_from_cookie:
-        set_cookie = (
-            f"Set-Cookie: {SESSION_COOKIE_NAME}={jwt_from_auth}; Path=/; HttpOnly\r\n".encode()
-        )
-
-    # Forward to backend
     try:
         backend = connect_unix_socket(subdomain)
         backend.sendall(data)
 
-        # Read response from backend
         response_data = b""
         while True:
             chunk = backend.recv(4096)
@@ -166,16 +85,8 @@ def handle_http(client):
             response_data += chunk
 
         backend.close()
-
-        # Inject Set-Cookie header into response (optional)
-        if set_cookie:
-            parts = response_data.split(b"\r\n\r\n", 1)
-            if len(parts) == 2:
-                headers, body = parts
-                headers += b"\r\n" + set_cookie
-                response_data = headers + b"\r\n\r\n" + body
-
         client.sendall(response_data)
+
     except Exception as e:
         client.send(b"HTTP/1.1 502 Bad Gateway\r\n\r\nBackend error\n")
         print(f"[HTTP] Proxy error: {e}")
@@ -194,29 +105,18 @@ def handle_tls(client):
 
 def handle_ssh(client):
     try:
-        # Step 1: Authenticate
-        client.send(b"Token: ")
-        token = client.recv(1024).strip()
-        if not verify_jwt(token):
-            client.send(b"Access denied\n")
-            client.close()
-            return
-
-        # Step 2: Ask for subdomain
+        # --- token prompt removed ---
         client.send(b"Subdomain: ")
         subdomain = client.recv(1024).strip().decode()
 
-        # Validate subdomain format (alphanumeric and hyphens)
-        if not re.match(r"^[a-zA-Z0-9\-]+$", subdomain):
+        if not re.match(r"^[a-zA-Z0-9\\-]+$", subdomain):
             client.send(b"Invalid subdomain format\n")
             client.close()
             return
 
-        client.send(b"Access granted. Connecting...\n")
-
+        client.send(b"Connecting...\n")
         backend = connect_unix_socket(subdomain)
 
-        # Step 3: Proxy data between client and backend
         def forward(src, dst):
             try:
                 while True:
