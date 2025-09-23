@@ -9,9 +9,9 @@ AUTHORIZED_KEYS_FILE="$AUTHORIZED_KEYS_DIR/authorized_keys"
 mkdir -p "$AUTHORIZED_KEYS_DIR"
 chmod 700 "$AUTHORIZED_KEYS_DIR"
 
-# Copy public key(s) from mounted secret into authorized_keys
-if [ -f /config/ssh/keys/id_ed25519.pub ]; then
-  cat /config/ssh/keys/id_ed25519.pub >> "$AUTHORIZED_KEYS_FILE"
+
+if [ -f /ssh-secret/id_ed25519.pub ]; then
+  cat /ssh-secret/id_ed25519.pub >> "$AUTHORIZED_KEYS_FILE"
   chmod 600 "$AUTHORIZED_KEYS_FILE"
 fi
 
