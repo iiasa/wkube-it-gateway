@@ -1,28 +1,24 @@
 # --- Stage 1: Build the Go binary ---
 FROM golang:1.24.1 AS builder
 
-# Set the working directory inside the container
 WORKDIR /app
-
-# Copy go.mod and go.sum separately to leverage caching
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy the rest of the source code
 COPY . .
-
-# Build the Go binary
 RUN env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o itgateway gateway.go
 
-# --- Stage 2: Create final image with SSH server ---
+# --- Stage 2: Final image with SSH server ---
 FROM linuxserver/openssh-server
 
-# Copy the built binary from the builder stage
+# Copy the Go binary
 COPY --from=builder /app/itgateway /usr/local/bin/itgateway
 
-# Copy your custom entrypoint script
-COPY entrypoint.sh /custom-entrypoint.sh
-RUN chmod +x /custom-entrypoint.sh
+# Add s6 service for itgateway
+RUN mkdir -p /etc/services.d/itgateway
+COPY scripts/run-itgateway.sh /etc/services.d/itgateway/run
+RUN chmod +x /etc/services.d/itgateway/run
 
-# Set custom entrypoint (ensure script is in the right path)
-ENTRYPOINT ["/custom-entrypoint.sh"]
+# (Optional) Add cont-init.d script if you need to patch sshd_config dynamically
+COPY scripts/10-sshd-config.sh /etc/cont-init.d/10-sshd-config
+RUN chmod +x /etc/cont-init.d/10-sshd-config
