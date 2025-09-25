@@ -22,7 +22,7 @@ _jwks_cache = {}
 
 
 context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-context.load_cert_chain(certfile="/path/to/cert.pem", keyfile="/path/to/key.pem")
+context.load_cert_chain(certfile="/etc/ssl/certs/tls.cert", keyfile="/etc/ssl/certs/tls.key")
 context.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1
 context.set_ciphers("ECDHE+AESGCM")
 

@@ -23,8 +23,8 @@ const (
 	DomainSuffix      = ".wkube.iiasa.ac.at"
 	JWKSUrl           = "https://accelerator-api.iiasa.ac.at/.well-known/jwks.json"
 	ExpectedKid       = "rsa-key-2024-07"
-	CertPath          = "/path/to/cert.pem"
-	KeyPath           = "/path/to/key.pem"
+	CertPath          = "/etc/ssl/certs/tls.cert"
+	KeyPath           = "/etc/ssl/certs/tls.key"
 )
 
 
