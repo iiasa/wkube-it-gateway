@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	Port              = ":2222"
+	Port              = ":6473"
 	SessionCookieName = "auth_token"
 	SocketDir         = "/tmp"
 	SocketSuffix      = ".sock"
