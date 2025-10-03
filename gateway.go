@@ -162,6 +162,7 @@ func handleSSH(conn net.Conn) {
 
 func handleConnection(conn net.Conn) {
 	peek := make([]byte, 8)
+	log.Println("Reached handleConnection...[oo]", peek)
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, err := conn.Read(peek); err != nil {
 		conn.Close()
