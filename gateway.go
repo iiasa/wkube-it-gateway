@@ -83,6 +83,9 @@ func connectUnixSocket(subdomain string) (net.Conn, error) {
 	return net.Dial("unix", path)
 }
 
+
+type closeWriter interface{ CloseWrite() error }
+
 // bidirectionalCopy wires src<->dst until both directions finish.
 // It does not close the passed conns itself; the caller owns closing.
 func bidirectionalCopy(a, b net.Conn) {
@@ -94,7 +97,7 @@ func bidirectionalCopy(a, b net.Conn) {
 		defer wg.Done()
 		_, _ = io.Copy(b, a)
 		// Try half-close if supported to signal EOF without tearing down both ways.
-		type closeWriter interface{ CloseWrite() error }
+		
 		if cw, ok := b.(closeWriter); ok {
 			_ = cw.CloseWrite()
 		}
